@@ -78,6 +78,31 @@ struct Node
 template <typename T>
 T Node<T>::queryEmbedding;
 
+template <typename T>
+Node<T>* buildKD_aux(
+    std::vector<std::pair<T,int>>& items,
+    const typename std::vector<std::pair<T, int>>::iterator& begin,
+    const typename std::vector<std::pair<T, int>>::iterator& end,
+    int depth
+) {
+    if (begin == end) return nullptr;
+
+    int split_dim = depth % runtime_dim();
+
+    std::sort(begin, end, [split_dim](const std::pair<T,int>& a, const std::pair<T,int>& b) {
+        return getCoordinate(a.first, split_dim) < getCoordinate(b.first,split_dim);
+    });
+
+    int mid = std::distance(begin, end) / 2;
+    Node<T>* root = new Node<T>();
+    root->embedding = items[mid].first;
+    root->idx = items[mid].second;
+    root->left = buildKD_aux(items, begin, begin + mid, depth + 1);
+    root->right = buildKD_aux(items, begin + mid + 1, end, depth + 1);
+
+    return root;
+}
+
 
 /**
  * Builds a KD-tree from a vector of items,
@@ -98,7 +123,7 @@ Node<T>* buildKD(std::vector<std::pair<T,int>>& items, int depth = 0)
     You should recursively construct the tree and return the root node.
     For now, this is a stub that returns nullptr.
     */
-    return nullptr;
+    return buildKD_aux(items, items.begin(), items.end(), depth);
 }
 
 template <typename T>
@@ -108,6 +133,7 @@ void freeTree(Node<T> *node) {
     freeTree(node->right);
     delete node;
 }
+
 
 /**
  * @brief Alias for a pair consisting of a float and an int.
