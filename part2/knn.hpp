@@ -81,24 +81,67 @@ T Node<T>::queryEmbedding;
 template <typename T>
 Node<T>* buildKD_aux(
     std::vector<std::pair<T,int>>& items,
-    const typename std::vector<std::pair<T, int>>::iterator& begin,
-    const typename std::vector<std::pair<T, int>>::iterator& end,
+    int start,
+    int end,
     int depth
 ) {
-    if (begin == end) return nullptr;
+    // if (depth == 2) return nullptr;
+    if (start == end) return nullptr;
+    int d = Embedding_T<T>::Dim();
+    int split_dim = depth % Embedding_T<T>::Dim();
 
-    int split_dim = depth % runtime_dim();
-
-    std::sort(begin, end, [split_dim](const std::pair<T,int>& a, const std::pair<T,int>& b) {
-        return getCoordinate(a.first, split_dim) < getCoordinate(b.first,split_dim);
+    std::sort(items.begin() + start, items.begin() + end, [split_dim, d](const std::pair<T,int>& a, const std::pair<T,int>& b) {
+        for (int i=split_dim; i < d; i++) {
+            float diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
+            if (diff == 0) continue;
+            return diff < 0;
+        }
+        for (int i=0; i < split_dim; i++) {
+            float diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
+            if (diff == 0) continue;
+            return diff < 0;
+        }
+        return getCoordinate(a.first, split_dim) < getCoordinate(b.first, split_dim);
     });
 
-    int mid = std::distance(begin, end) / 2;
+    // for (int i=0; i<(int)items.size(); i++) {
+
+    //     if constexpr (std::is_same_v<T, float>) {
+    //         std::cout << items[i].first << ", ";
+    //     } else {
+    //         for (auto j : items[i].first) std::cout << j << ' ';
+    //         std::cout << ", ";
+    //     }
+    // }
+    // std::cout << std::endl;
+    int mid = (start + end - 1) / 2;
+    // if ((start + end) % 2 == 0) {
+    //     int a = (start + end - 1) / 2;
+    //     int b = (start + end) / 2;
+
+    //     if (items[a].second < items[b].second) {
+    //         mid = a;
+    //     }
+    //     else mid = b;
+    // }
     Node<T>* root = new Node<T>();
+    // if (depth ==0 ) {    if constexpr (std::is_same_v<T, float>) {
+    //         std::cout << items[mid].first << std::endl;
+    //     } else {
+    //         for (auto i : items[mid].first) std::cout << i << std::endl;
+    //     }}
+    //     if (depth ==0 ) {    if constexpr (std::is_same_v<T, float>) {
+    //         std::cout << items[mid + 1].first << std::endl;
+    //     } else {
+    //         for (auto i : items[mid + 1].first) std::cout << i << std::endl;
+    //     }}
     root->embedding = items[mid].first;
     root->idx = items[mid].second;
-    root->left = buildKD_aux(items, begin, begin + mid, depth + 1);
-    root->right = buildKD_aux(items, begin + mid + 1, end, depth + 1);
+    // std::cout << std::distance(items.begin(), begin) << ' ' << std::distance(items.begin(), end) << std::endl;
+    // if (depth == 0) std::cout << start << " " << end << std::endl;
+
+    root->left = buildKD_aux(items, start, mid, depth + 1);
+    root->right = buildKD_aux(items, mid + 1, end, depth + 1);
 
     return root;
 }
@@ -123,7 +166,7 @@ Node<T>* buildKD(std::vector<std::pair<T,int>>& items, int depth = 0)
     You should recursively construct the tree and return the root node.
     For now, this is a stub that returns nullptr.
     */
-    return buildKD_aux(items, items.begin(), items.end(), depth);
+    return buildKD_aux(items, 0, (int) items.size(), depth);
 }
 
 template <typename T>
@@ -182,5 +225,34 @@ void knnSearch(Node<T> *node,
     You should recursively traverse the tree and maintain a max-heap of the K closest points found so far.
     For now, this is a stub that does nothing.
     */
+    if (node == nullptr) return;
+
+    int split_dim = depth % Embedding_T<T>::Dim();
+    
+    float qdist = Embedding_T<T>::distance(node->embedding, Node<T>::queryEmbedding);
+    if ((int) heap.size() < K) {
+        heap.push(PQItem(qdist, node->idx));
+    }
+    else {
+        float hdist = heap.top().first;
+        if (hdist > qdist) {
+            heap.pop();
+            heap.push(PQItem(qdist, node->idx));
+        }
+    }
+    Node<T> *close, *far;
+    if (getCoordinate<T>(node->embedding, split_dim) > getCoordinate<T>(Node<T>::queryEmbedding, split_dim)) {
+        close = node->left;
+        far = node->right;
+    }
+    else {
+        close = node->right;
+        far = node->left;
+    }
+    knnSearch(close, depth + 1, K, heap);
+    float hdist = heap.top().first;
+    if (std::abs(getCoordinate<T>(Node<T>::queryEmbedding, split_dim) - getCoordinate<T>(node->embedding, split_dim)) < hdist || (int) heap.size() < K) {
+        knnSearch(far, depth + 1, K, heap);
+    }
     return;
 }
