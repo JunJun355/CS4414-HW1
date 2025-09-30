@@ -2,6 +2,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <unordered_set>
 #include "alglibmisc.h"
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -9,6 +10,55 @@
 
 using json = nlohmann::json;
 
+void runBenchmark(alglib::kdtree& tree, alglib::real_1d_array& query, int k) {
+    std::cout << "\n#### Starting Benchmark ####\n" << std::endl;
+
+    const std::vector<double> epsilons = {0.0, 0.5, 1.0, 2.0, 5.0, 7.0, 8.0, 10.0, 20.0};
+    const int num_trials = 3;
+
+    alglib::kdtreequeryaknn(tree, query, k, 0.0);
+    alglib::integer_1d_array exact_tags;
+    alglib::kdtreequeryresultstags(tree, exact_tags);
+    std::unordered_set<int> ground_truth_ids;
+    for(alglib::ae_int_t i = 0; i < k; ++i) {
+        ground_truth_ids.insert(exact_tags[i]);
+    }
+
+    // --- 2. Run Benchmark for each Epsilon ---
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << std::setw(10) << "Epsilon" << std::setw(20) << "Search Time (ms)" << std::setw(20) << "Accuracy" << std::endl;
+    std::cout << std::string(50, '-') << std::endl;
+
+    for (double eps : epsilons) {
+        std::vector<double> trial_times;
+        
+        // Run trials to get median time
+        for (int i = 0; i < num_trials; ++i) {
+            auto start = std::chrono::high_resolution_clock::now();
+            alglib::kdtreequeryaknn(tree, query, k, eps);
+            auto end = std::chrono::high_resolution_clock::now();
+            trial_times.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+        }
+        std::sort(trial_times.begin(), trial_times.end());
+        double median_time = trial_times[num_trials / 2];
+
+        // Run once more to get results for accuracy calculation
+        alglib::ae_int_t count = alglib::kdtreequeryaknn(tree, query, k, eps);
+        alglib::integer_1d_array result_tags;
+        alglib::kdtreequeryresultstags(tree, result_tags);
+        
+        int correct_neighbors = 0;
+        for (alglib::ae_int_t i = 0; i < count; ++i) {
+            if (ground_truth_ids.count(result_tags[i])) {
+                correct_neighbors++;
+            }
+        }
+        
+        std::string accuracy_str = std::to_string(correct_neighbors) + "/" + std::to_string(k);
+        std::cout << std::setw(10) << eps << std::setw(20) << median_time << std::setw(20) << accuracy_str << std::endl;
+    }
+    std::cout << "\n#### Benchmark Finished ####\n" << std::endl;
+}
 
 int main(int argc, char* argv[]) {
     auto program_start = std::chrono::high_resolution_clock::now();
@@ -114,6 +164,8 @@ int main(int argc, char* argv[]) {
         alglib::kdtreebuildtagged(allPoints, tags, N, D, 0, 2, tree);
         auto buildtree_end = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> buildtree_duration = buildtree_end - buildtree_start;
+
+        runBenchmark(tree, query, k);
 
         auto query_start = std::chrono::high_resolution_clock::now();
         alglib::ae_int_t count = alglib::kdtreequeryaknn(tree, query, k, eps);
