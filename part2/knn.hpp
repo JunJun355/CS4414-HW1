@@ -2,6 +2,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <array>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <queue>
@@ -18,10 +19,7 @@ struct Embedding_T<float>
 {
     static size_t Dim() { return 1; }
 
-    static float distance(const float &a, const float &b)
-    {
-        return std::abs(a - b);
-    }
+    static float distance(const float &a, const float &b) { return std::abs(a - b); }
 };
 
 
@@ -47,27 +45,6 @@ struct Embedding_T<std::vector<float>>
             s += d * d;
         }
         return std::sqrt(s);
-        // size_t D = Dim();
-        // float partial[2] = {0, 0};
-        // std::thread threads[2];
-
-        // auto worker = [&](int tid) {
-        //     size_t chunk = D / 4;
-        //     size_t start = tid * chunk;
-        //     size_t end = (tid == 3) ? D : start + chunk;
-        //     for (size_t i = start; i < end; ++i) {
-        //         float d = a[i] - b[i];
-        //         partial[tid] += d * d;
-        //     }
-        // };
-
-        // for (int t = 0; t < 2; ++t)
-        //     threads[t] = std::thread(worker, t);
-        // for (int t = 0; t < 2; ++t)
-        //     threads[t].join();
-
-        // float s = partial[0] + partial[1];// + partial[2] + partial[3];
-        // return std::sqrt(s);
     }
 };
 
@@ -91,13 +68,22 @@ constexpr float getDiffAtCoor(T const &a, T const &b, size_t axis) {
     }
 }
 
-
 // KD-tree node
+template <typename T>
+struct SubNode {
+    int idx = 0;
+    int left_idx = -1;
+    int right_idx = -1;
+    T embedding;
+};
+
 template <typename T>
 struct Node
 {
+    //janky way to return a tree instead of a node
+    // std::array<SubNode<T>, 40000> nodes;
+
     T embedding;
-    // std::string url;
     int idx;
     Node *left = nullptr;
     Node *right = nullptr;
@@ -144,60 +130,15 @@ Node<T>* buildKD_aux(
         return false;
     });
 
-    // for (int i=0; i<(int)items.size(); i++) {
-
-    //     if constexpr (std::is_same_v<T, float>) {
-    //         std::cout << items[i].first << ", ";
-    //     } else {
-    //         for (auto j : items[i].first) std::cout << j << ' ';
-    //         std::cout << ", ";
-    //     }
-    // }
-    // std::cout << std::endl;
-    // if ((start + end) % 2 == 0) {
-    //     int a = (start + end - 1) / 2;
-    //     int b = (start + end) / 2;
-
-    //     if (items[a].second < items[b].second) {
-    //         mid = a;
-    //     }
-    //     else mid = b;
-    // }
     Node<T>* root = node_pool[mid];
-    // if (depth ==0 ) {    if constexpr (std::is_same_v<T, float>) {
-    //         std::cout << items[mid].first << std::endl;
-    //     } else {
-    //         for (auto i : items[mid].first) std::cout << i << std::endl;
-    //     }}
-    //     if (depth ==0 ) {    if constexpr (std::is_same_v<T, float>) {
-    //         std::cout << items[mid + 1].first << std::endl;
-    //     } else {
-    //         for (auto i : items[mid + 1].first) std::cout << i << std::endl;
-    //     }}
+
     root->embedding = items[mid].first;
     root->idx = items[mid].second;
-    // std::cout << std::distance(items.begin(), begin) << ' ' << std::distance(items.begin(), end) << std::endl;
-    // if (depth == 0) std::cout << start << " " << end << std::endl;
-    if (depth < 1/*end - start > 1550*/) {
-        // Node<T>* left = nullptr;
-        // Node<T>* right = nullptr;
 
-        // std::thread left_thread([&left, &items, start, mid, depth]() {
-        //     left = buildKD_aux(items, start, mid, depth + 1);
-        // });
-        // std::thread right_thread([&right, &items, mid, end, depth]() {
-        //     right = buildKD_aux(items, mid + 1, end, depth + 1);
-        // });
-
-        // left_thread.join();
-        // right_thread.join();
+    if (depth < 1) {
         auto fleft = std::async(std::launch::async, [&items, &node_pool, start, mid, depth]() {
             return buildKD_aux(items, node_pool, start, mid, depth + 1);
         });
-        // auto fright = std::async(std::launch::async, [&items, mid, end, depth]() {
-        //     return buildKD_aux(items, mid + 1, end, depth + 1);
-        // });
-
 
         root->right = buildKD_aux(items, node_pool, mid + 1, end, depth + 1);
         root->left = fleft.get();
@@ -225,11 +166,6 @@ Node<T>* buildKD_aux(
 template <typename T>
 Node<T>* buildKD(std::vector<std::pair<T,int>>& items, int depth = 0)
 {
-    /*
-    TODO: Implement this function to build a balanced KD-tree.
-    You should recursively construct the tree and return the root node.
-    For now, this is a stub that returns nullptr.
-    */
     std::vector<Node<T>*> node_pool(items.size());
     for (int i=0; i<(int)items.size(); i++) node_pool[i] = new Node<T>();
 
@@ -287,11 +223,6 @@ void knnSearch(Node<T> *node,
                int K,
                MaxHeap &heap)
 {
-    /*
-    TODO: Implement this function to perform k-nearest neighbors (k-NN) search on the KD-tree.
-    You should recursively traverse the tree and maintain a max-heap of the K closest points found so far.
-    For now, this is a stub that does nothing.
-    */
     if (node == nullptr) return;
 
     int split_dim = depth % Embedding_T<T>::Dim();
@@ -317,8 +248,7 @@ void knnSearch(Node<T> *node,
         far = node->left;
     }
     knnSearch(close, depth + 1, K, heap);
-    float hdist = heap.top().first;
-    if (std::abs(getCoordinate<T>(Node<T>::queryEmbedding, split_dim) - getCoordinate<T>(node->embedding, split_dim)) < hdist || (int) heap.size() < K) {
+    if ((int) heap.size() < K || std::abs(getCoordinate<T>(Node<T>::queryEmbedding, split_dim) - getCoordinate<T>(node->embedding, split_dim)) < heap.top().first) {
         knnSearch(far, depth + 1, K, heap);
     }
     return;
