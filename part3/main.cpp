@@ -76,7 +76,81 @@ int main(int argc, char* argv[]) {
             - Get the index of each found neighbour  using alglib::kdtreequeryresultstags
             - Get the distance between each found neighbour and the query embedding using alglib::kdtreequeryresultsdists
         */
+        size_t N = passages_json.size();
+        alglib::real_2d_array allPoints;
+        allPoints.setlength(N, D);
+        alglib::integer_1d_array tags;
+        tags.setlength(N);
+
+        // std::vector<std::pair<T, int>> allPoints;
+        // allPoints.reserve(passages_json.size());
+        // for (const auto& elem : passages_json) {
+        //     T emb;
+        //     if constexpr (std::is_same_v<T, float>) {
+        //         emb = elem["embedding"].get<float>();
+        //     } else {
+        //         emb.resize(Embedding_T<T>::Dim());
+        //         for (size_t i = 0; i < Embedding_T<T>::Dim(); ++i) {
+        //             emb[i] = elem["embedding"][i].get<float>();
+        //         }
+        //     }
+        //     int idx = elem["id"].get<int>();
+        //     allPoints.emplace_back(emb, idx);
+        // }
+
+        for (size_t i = 0; i < N; ++i) {
+            const auto& elem = passages_json[i];
+            tags[i] = elem["id"].get<int>();
+            for (size_t d = 0; d < D; ++d) {
+                allPoints[i][d] = elem["embedding"][d].get<double>();
+            }
+        }
+
+        auto processing_end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> processing_duration = processing_end - processing_start;
+
+        auto buildtree_start = std::chrono::high_resolution_clock::now();
+        alglib::kdtree tree;
+        alglib::kdtreebuildtagged(allPoints, tags, N, D, 0, 2, tree);
+        auto buildtree_end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> buildtree_duration = buildtree_end - buildtree_start;
+
+        auto query_start = std::chrono::high_resolution_clock::now();
+        alglib::ae_int_t count = alglib::kdtreequeryaknn(tree, query, k, eps);
+        auto query_end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> query_duration = query_end - query_start;
+
+        alglib::real_1d_array dists;
+        alglib::integer_1d_array result_tags;
         
+        alglib::kdtreequeryresultsdistances(tree, dists);
+        alglib::kdtreequeryresultstags(tree, result_tags);
+        
+        auto program_end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> program_duration = program_end - program_start;
+
+
+        std::cout << "query:\n";
+        std::cout << "  text:    " << query_obj["text"] << "\n\n";
+        
+        std::cout << std::fixed << std::setprecision(6); // Format output for distances
+
+        for (alglib::ae_int_t i = 0; i < count; ++i) {
+            int   id   = result_tags[i];
+            double dist = dists[i];
+            auto& elem = dict[id];
+
+            std::cout << "Neighbor " << (i + 1) << ":\n";
+            std::cout << "  id:      " << id
+                      << ", dist = " << dist << "\n";
+            std::cout << "  text:    " << elem["text"].get<std::string>() << "\n\n";
+        }
+
+        std::cout << "#### Performance Metrics ####\n";
+        std::cout << "Elapsed time: " << program_duration.count() << " ms\n";
+        std::cout << "Processing time: " << processing_duration.count() << " ms\n";
+        std::cout << "KD-tree build time: " << buildtree_duration.count() << " ms\n";
+        std::cout << "K-NN query time: " << query_duration.count() << " ms\n";
     }
     catch(alglib::ap_error &e) {
         std::cerr << "ALGLIB error: " << e.msg << std::endl;
