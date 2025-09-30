@@ -82,35 +82,59 @@ int runMain(char **argv)
 
 
     // Build balanced KD‐tree
-    auto buildtree_start = std::chrono::high_resolution_clock::now();
-    Node<T>* root = buildKD(allPoints, 0);
-    auto buildtree_end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> buildtree_duration = buildtree_end - buildtree_start;
+    constexpr int times = 16;
+    
+    Node<T>* root;
+    std::chrono::duration<double, std::milli> best = processing_duration;
+    for (int i=0; i < times; i++) {
+        auto buildtree_start = std::chrono::high_resolution_clock::now();
+        root = buildKD(allPoints, 0);
+        auto buildtree_end = std::chrono::high_resolution_clock::now();
+        if (best > buildtree_end - buildtree_start) best = buildtree_end - buildtree_start;
+    }
+
+    std::chrono::duration<double, std::milli> buildtree_duration = best;
 
     // Perform K‐NN search and collect results
-    auto query_start = std::chrono::high_resolution_clock::now();
+    
+    
+    
+    
+    best = processing_duration;
+    std::vector<PQItem> out;
     MaxHeap heap;
-    knnSearch(root, 0, K, heap);
-    auto query_end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> query_duration = query_end - query_start;
+    for (int i=0; i < times; i++) {
+        out.clear();
+        auto query_start = std::chrono::high_resolution_clock::now();
+        knnSearch(root, 0, K, heap);
+        auto query_end = std::chrono::high_resolution_clock::now();
+        if (best > query_end - query_start) best = query_end - query_start;
+        
+        while (!heap.empty()) {
+            out.push_back(heap.top());
+            heap.pop();
+        }
+        std::sort(out.begin(), out.end(), [](auto &a, auto &b) { return a.first < b.first; });
+    }
+    std::chrono::duration<double, std::milli> query_duration = best;
 
     // Collect and sort ascending by distance
-    std::vector<PQItem> out;
-    while (!heap.empty()) {
-        out.push_back(heap.top());
-        heap.pop();
-    }
-    std::sort(out.begin(), out.end(),
-              [](auto &a, auto &b) { return a.first < b.first; });
+    // std::vector<PQItem> out;
+    // while (!heap.empty()) {
+    //     out.push_back(heap.top());
+    //     heap.pop();
+    // }
+    // std::sort(out.begin(), out.end(),
+    //           [](auto &a, auto &b) { return a.first < b.first; });
 
     auto program_end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> program_duration = program_end - program_start;
 
 
     // Print query and its top‐K neighbors
-    std::cout << "query:\n";
-    // std::cout << "  embedding: " << query_obj["embedding"] << "\n";
-    std::cout << "  text:    " << query_obj["text"] << "\n\n";
+    // std::cout << "query:\n";
+    // // std::cout << "  embedding: " << query_obj["embedding"] << "\n";
+    // std::cout << "  text:    " << query_obj["text"] << "\n\n";
 
     // nlohmann::json output_json = nlohmann::json::array();
 
@@ -120,11 +144,12 @@ int runMain(char **argv)
         int   idx    = p.second;
         auto &elem   = dict[idx];
 
-        std::cout << "Neighbor " << (i + 1) << ":\n";
-        std::cout << "  id:      " << idx
-                  << ", dist = " << dist << "\n";
-        // std::cout << "  embedding: " << elem["embedding"] << "\n";
-        std::cout << "  text:    " << elem["text"] << "\n\n";
+        std::cout << idx << ", ";
+        // std::cout << "Neighbor " << (i + 1) << ":\n";
+        // std::cout << "  id:      " << idx
+        //           << ", dist = " << dist << "\n";
+        // // std::cout << "  embedding: " << elem["embedding"] << "\n";
+        // std::cout << "  text:    " << elem["text"] << "\n\n";
 
         nlohmann::json entry;
         entry["id"]      = idx;
@@ -134,6 +159,7 @@ int runMain(char **argv)
 
         // output_json.push_back(entry);
     }
+    std::cout << std::endl;
 
 
     // std::string output_json_file = (std::is_same_v<T, float>) ? "neighbors_scalar.json" : "neighbors_vector.json";
@@ -142,9 +168,9 @@ int runMain(char **argv)
     // file.close();
 
     
-    std::cout << "#### Performance Metrics ####\n";
-    std::cout << "Elapsed time: " << program_duration.count() << " ms\n";
-    std::cout << "Processing time: " << processing_duration.count() << " ms\n";
+    // std::cout << "#### Performance Metrics ####\n";
+    // std::cout << "Elapsed time: " << program_duration.count() << " ms\n";
+    // std::cout << "Processing time: " << processing_duration.count() << " ms\n";
     std::cout << "KD-tree build time: " << buildtree_duration.count() << " ms\n";
     std::cout << "K-NN query time: " << query_duration.count() << " ms\n";
 

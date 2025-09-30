@@ -1,7 +1,7 @@
 # Makefile for compiling main.cpp with knn.hpp
 
 CXX = g++
-CXXFLAGS = -std=c++20 -O3 -Wall
+CXXFLAGS = -std=c++20 -O3 -Wall -fopenmp
 TARGET = main
 SRCS = main.cpp
 OBJS = $(SRCS:.cpp=.o)

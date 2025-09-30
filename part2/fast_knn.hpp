@@ -5,9 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <queue>
-#include <thread>
-#include <future>
-#include <memory>
+
 
 template <typename T, typename = void>
 struct Embedding_T;
@@ -47,27 +45,6 @@ struct Embedding_T<std::vector<float>>
             s += d * d;
         }
         return std::sqrt(s);
-        // size_t D = Dim();
-        // float partial[2] = {0, 0};
-        // std::thread threads[2];
-
-        // auto worker = [&](int tid) {
-        //     size_t chunk = D / 4;
-        //     size_t start = tid * chunk;
-        //     size_t end = (tid == 3) ? D : start + chunk;
-        //     for (size_t i = start; i < end; ++i) {
-        //         float d = a[i] - b[i];
-        //         partial[tid] += d * d;
-        //     }
-        // };
-
-        // for (int t = 0; t < 2; ++t)
-        //     threads[t] = std::thread(worker, t);
-        // for (int t = 0; t < 2; ++t)
-        //     threads[t].join();
-
-        // float s = partial[0] + partial[1];// + partial[2] + partial[3];
-        // return std::sqrt(s);
     }
 };
 
@@ -79,15 +56,6 @@ constexpr float getCoordinate(T const &e, size_t axis) {
         return e;          // scalar case
     } else {
         return e[axis];    // vector case
-    }
-}
-
-template<typename T>
-constexpr float getDiffAtCoor(T const &a, T const &b, size_t axis) {
-    if constexpr (std::is_same_v<T, float>) {
-        return a - b;          // scalar case
-    } else {
-        return a[axis] - b[axis];    // vector case
     }
 }
 
@@ -113,7 +81,6 @@ T Node<T>::queryEmbedding;
 template <typename T>
 Node<T>* buildKD_aux(
     std::vector<std::pair<T,int>>& items,
-    std::vector<Node<T>*>& node_pool,
     int start,
     int end,
     int depth
@@ -121,27 +88,20 @@ Node<T>* buildKD_aux(
     // if (depth == 2) return nullptr;
     if (start == end) return nullptr;
     int d = Embedding_T<T>::Dim();
-    int split_dim = (depth) % d;
-    
-    int mid = (start + end - 1) / 2;
+    int split_dim = depth % Embedding_T<T>::Dim();
 
-    std::nth_element(items.begin() + start, items.begin() + mid, items.begin() + end, [split_dim, d](const std::pair<T,int>& a, const std::pair<T,int>& b) {
-        // float diff = getCoordinate(a.first, split_dim) - getCoordinate(b.first, split_dim);
-        float diff = getDiffAtCoor(a.first, b.first, split_dim);
-        if (diff != 0) return diff < 0;
-        for (int i=split_dim + 1; i < d; i++) {
-            diff = getDiffAtCoor(a.first, b.first, i);
-            // diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
+    std::sort(items.begin() + start, items.begin() + end, [split_dim, d](const std::pair<T,int>& a, const std::pair<T,int>& b) {
+        for (int i=split_dim; i < d; i++) {
+            float diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
             if (diff == 0) continue;
             return diff < 0;
         }
         for (int i=0; i < split_dim; i++) {
-            diff = getDiffAtCoor(a.first, b.first, i);
-            // diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
+            float diff = getCoordinate(a.first, i) - getCoordinate(b.first, i);
             if (diff == 0) continue;
             return diff < 0;
         }
-        return false;
+        return getCoordinate(a.first, split_dim) < getCoordinate(b.first, split_dim);
     });
 
     // for (int i=0; i<(int)items.size(); i++) {
@@ -154,6 +114,7 @@ Node<T>* buildKD_aux(
     //     }
     // }
     // std::cout << std::endl;
+    int mid = (start + end - 1) / 2;
     // if ((start + end) % 2 == 0) {
     //     int a = (start + end - 1) / 2;
     //     int b = (start + end) / 2;
@@ -163,7 +124,7 @@ Node<T>* buildKD_aux(
     //     }
     //     else mid = b;
     // }
-    Node<T>* root = node_pool[mid];
+    Node<T>* root = new Node<T>();
     // if (depth ==0 ) {    if constexpr (std::is_same_v<T, float>) {
     //         std::cout << items[mid].first << std::endl;
     //     } else {
@@ -178,33 +139,26 @@ Node<T>* buildKD_aux(
     root->idx = items[mid].second;
     // std::cout << std::distance(items.begin(), begin) << ' ' << std::distance(items.begin(), end) << std::endl;
     // if (depth == 0) std::cout << start << " " << end << std::endl;
-    if (depth < 1/*end - start > 1550*/) {
-        // Node<T>* left = nullptr;
-        // Node<T>* right = nullptr;
+    if (depth == 3) {
+        Node<T>* left = nullptr;
+        Node<T>* right = nullptr;
 
-        // std::thread left_thread([&left, &items, start, mid, depth]() {
-        //     left = buildKD_aux(items, start, mid, depth + 1);
-        // });
-        // std::thread right_thread([&right, &items, mid, end, depth]() {
-        //     right = buildKD_aux(items, mid + 1, end, depth + 1);
-        // });
-
-        // left_thread.join();
-        // right_thread.join();
-        auto fleft = std::async(std::launch::async, [&items, &node_pool, start, mid, depth]() {
-            return buildKD_aux(items, node_pool, start, mid, depth + 1);
+        std::thread left_thread([&left, &items, start, mid, depth]() {
+            left = buildKD_aux(items, start, mid, depth + 1);
         });
-        // auto fright = std::async(std::launch::async, [&items, mid, end, depth]() {
-        //     return buildKD_aux(items, mid + 1, end, depth + 1);
-        // });
+        std::thread right_thread([&right, &items, mid + 1, end, depth]() {
+            right = buildKD_aux(items, mid + 1, end, depth + 1);
+        });
 
+        left_thread.join();
+        right_thread.join();
 
-        root->right = buildKD_aux(items, node_pool, mid + 1, end, depth + 1);
-        root->left = fleft.get();
+        root->left = left;
+        root->right = right;
     }
     else {
-        root->left = buildKD_aux(items, node_pool, start, mid, depth + 1);
-        root->right = buildKD_aux(items, node_pool, mid + 1, end, depth + 1);
+        root->left = buildKD_aux(items, start, mid, depth + 1);
+        root->right = buildKD_aux(items, mid + 1, end, depth + 1);
     }
 
     return root;
@@ -230,10 +184,7 @@ Node<T>* buildKD(std::vector<std::pair<T,int>>& items, int depth = 0)
     You should recursively construct the tree and return the root node.
     For now, this is a stub that returns nullptr.
     */
-    std::vector<Node<T>*> node_pool(items.size());
-    for (int i=0; i<(int)items.size(); i++) node_pool[i] = new Node<T>();
-
-    return buildKD_aux(items, node_pool, 0, (int) items.size(), depth);
+    return buildKD_aux(items, 0, (int) items.size(), depth);
 }
 
 template <typename T>
