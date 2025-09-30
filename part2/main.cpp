@@ -107,6 +107,7 @@ int runMain(char **argv)
         out.clear();
         auto query_start = std::chrono::high_resolution_clock::now();
         knnSearch(root, 0, K, heap);
+        // if (i == 0) std::cout << asdf << std::endl;
         // std::cout << K << ' ';
         auto query_end = std::chrono::high_resolution_clock::now();
         if (best > query_end - query_start) best = query_end - query_start;
