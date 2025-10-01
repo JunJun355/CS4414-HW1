@@ -9,6 +9,11 @@
 #include <thread>
 #include <future>
 #include <memory>
+// #include <omp.h>
+
+#if defined(__SSE2__)
+    #include <emmintrin.h> // Header for SSE2
+#endif
 
 // 4, 5, 12920, 26743, 6, 0, 3, 68740, 40982, 63176,
 
@@ -21,7 +26,7 @@ struct Embedding_T<float>
 {
     static size_t Dim() { return 1; }
 
-    static float distance(const float &a, const float &b) { return std::abs(a - b); }
+    static constexpr float distance(const float &a, const float &b) { return std::abs(a - b); }
 };
 
 
@@ -37,16 +42,47 @@ struct Embedding_T<std::vector<float>>
 {
     static size_t Dim() { return runtime_dim(); }
     
-    static float distance(const std::vector<float> &a,
-                          const std::vector<float> &b)
-    {
-        float s = 0;
-        for (size_t i = 0; i < Dim(); ++i)
-        {
+    static float distance_aux (
+        const float* __restrict__ a,
+        const float* __restrict__ b,
+        const size_t dim
+    ) {
+    #if defined(__SSE2__)
+        __m128 sum_vec = _mm_setzero_ps();
+        size_t i = 0;
+        for (; i + 3 < dim; i += 4) {
+            __m128 vec_a = _mm_loadu_ps(a + i);
+            __m128 vec_b = _mm_loadu_ps(b + i);
+            __m128 diff = _mm_sub_ps(vec_a, vec_b);
+            __m128 sq = _mm_mul_ps(diff, diff);
+            sum_vec = _mm_add_ps(sum_vec, sq);
+        }
+        float buffer[4];
+        _mm_storeu_ps(buffer, sum_vec);
+        float s = buffer[0] + buffer[1] + buffer[2] + buffer[3];
+        for (; i < dim; ++i) {
             float d = a[i] - b[i];
             s += d * d;
         }
         return std::sqrt(s);
+
+    #else
+        float s = 0;
+        #pragma omp simd reduction(+:s)
+        for (size_t i = 0; i < dim; ++i) {
+            float d = a[i] - b[i];
+            s += d * d;
+        }
+        // return s;
+        return std::sqrt(s);
+    #endif
+    }
+                            
+
+    static float distance(const std::vector<float> &a,
+                          const std::vector<float> &b)
+    {
+        return distance_aux(a.data(), b.data(), Dim());
     }
 };
 
@@ -62,7 +98,7 @@ constexpr float getDiffAtCoor(T const &a, T const &b, size_t axis) {
 // KD-tree node
 template <typename T>
 struct SubNode {
-    // Should be precisely 32 bytes, since int+short+short+T is 4+2+2+24
+    // Should be precisely 32 bytes, since int+short+short+T is 4+2+2+24  NVM
     int idx = 0;
     unsigned short left_idx = -1;
     unsigned short right_idx = -1;
@@ -113,17 +149,17 @@ unsigned short buildKD_aux(
     curr->embedding = &(items[mid].first);
     curr->idx = items[mid].second;
 
-    if (depth < 1) {
+    if (depth > 1) {
+        curr->left_idx = buildKD_aux(items, root, start, mid, depth + 1);
+        curr->right_idx = buildKD_aux(items, root, mid + 1, end, depth + 1);
+    }
+    else {
         auto fleft = std::async(std::launch::async, [&items, root, start, mid, depth]() {
             return buildKD_aux(items, root, start, mid, depth + 1);
         });
 
         curr->right_idx = buildKD_aux(items, root, mid + 1, end, depth + 1);
         curr->left_idx= fleft.get();
-    }
-    else {
-        curr->left_idx = buildKD_aux(items, root, start, mid, depth + 1);
-        curr->right_idx = buildKD_aux(items, root, mid + 1, end, depth + 1);
     }
 
     return mid;
@@ -209,9 +245,31 @@ void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap) {
         close = node->right_idx;
         far = node->left_idx;
     }
-    if (close != 65535) knnSearch_aux(root, close, depth + 1, K, heap);
-    if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
-        if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+    if (depth > 1) {
+        if (close != 65535) {
+            knnSearch_aux(root, close, depth + 1, K, heap);
+        }
+        if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
+            if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+        }
+    }
+    else {
+        MaxHeap close_heap;
+        auto fleft = std::async(std::launch::async, [root, close, depth, K, &close_heap]() {
+            knnSearch_aux(root, close, depth + 1, K, close_heap);
+        });
+
+        if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
+            if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+        }
+        fleft.get();
+        while (!close_heap.empty()) {
+            heap.push(close_heap.top());
+            close_heap.pop();
+        }
+        while ((int)heap.size() > K) {
+            heap.pop();
+        }
     }
 }
 
