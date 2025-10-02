@@ -13,8 +13,8 @@
 // 4, 5, 12920, 26743, 6, 0, 3, 68740, 40982, 63176,
 #define N 4
 
-#if defined(__SSE2__)
-    #include <emmintrin.h> // Header for SSE2
+#if defined(__SSE2__) || defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h> // Header for SSE2 or AVX2
 #endif
 
 // KD-tree node
@@ -79,6 +79,18 @@ struct ThreadTask {
             wakeup.notify_all();
         }
 
+        void wait() {
+            while (true) {
+                std::unique_lock<std::mutex> lock(mutex);
+
+                if (!task) return;
+
+                finished.wait(lock, [this] { return this->task == nullptr; });
+
+                if (!task) return;
+            }
+        }
+
         void doit() {
             // std::cout << "Task tried" << std::endl;
             std::lock_guard<std::mutex> lock(mutex);
@@ -90,7 +102,9 @@ struct ThreadTask {
 
             task();
             task = nullptr;
+            // std::cout << "done" << std::endl;
             thread_pool<T>().dec_active();
+            finished.notify_all();
         }
 
         bool hasTask() {
@@ -99,6 +113,7 @@ struct ThreadTask {
         }
 
     private:
+        std::condition_variable finished;
         std::mutex mutex;
         std::function<void()> task;
 };
@@ -142,6 +157,10 @@ struct ThreadPool {
         }
 
         void thread_func(int i);
+
+        void wait_thread(int i) {
+            tasks[i].wait();
+        }
 
         void wait() {
             // std::cout << "Waiting for all to finish" << std::endl;
@@ -214,7 +233,26 @@ struct Embedding_T<std::vector<float>>
         const float* __restrict__ b,
         const size_t dim
     ) {
-    #if defined(__SSE2__)
+    #if defined(__AVX2__)
+        __m256 sum_vec = _mm256_setzero_ps();
+        size_t i = 0;
+        for (; i + 7 < dim; i += 8) {
+            __m256 vec_a = _mm256_loadu_ps(a + i);
+            __m256 vec_b = _mm256_loadu_ps(b + i);
+            __m256 diff = _mm256_sub_ps(vec_a, vec_b);
+            sum_vec = _mm256_fmadd_ps(diff, diff, sum_vec);
+        }
+        float buffer[8];
+        _mm256_storeu_ps(buffer, sum_vec);
+        float s = buffer[0] + buffer[1] + buffer[2] + buffer[3] +
+                  buffer[4] + buffer[5] + buffer[6] + buffer[7];
+        for (; i < dim; ++i) {
+            float d = a[i] - b[i];
+            s += d * d;
+        }
+        return std::sqrt(s);
+
+    #elif defined(__SSE2__)
         __m128 sum_vec = _mm_setzero_ps();
         size_t i = 0;
         for (; i + 3 < dim; i += 4) {
@@ -298,12 +336,13 @@ void buildKD_aux(
     curr->idx = items[mid].second;
 
     if (depth == 0) {
+        // std::cout << 1 << ' ' << mid << ' ' << end << std::endl;
         thread_pool<T>().submit_task(1, [&items, root, mid, end, depth]() {
             return buildKD_aux(items, root, mid + 1, end, depth + 1, 1);
         });
         buildKD_aux(items, root, start, mid, depth + 1);
     } else if (depth == 1) {
-        // std::cout << thread_num << std::endl;
+        // std::cout << thread_num + 1 << ' ' << mid << ' ' << end << std::endl;
         thread_pool<T>().submit_task(thread_num + 1, [&items, root, mid, end, depth, thread_num]() {
             return buildKD_aux(items, root, mid + 1, end, depth + 1, thread_num + 1);
         });
@@ -352,7 +391,7 @@ void freeTree(Node<T> *node) {
 
 // int asdf=0;
 template <typename T>
-void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap) {
+void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap, int thread_num = -1) {
     // asdf++;
     int split_dim = depth % Embedding_T<T>::Dim();
 
@@ -369,17 +408,89 @@ void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap) {
             heap.push(PQItem(qdist, node->idx));
         }
     }
-    
-    unsigned short close, far;
-    if (getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0) {
-        close = node->left_idx;
-        far = node->right_idx;
-    }
-    else {
-        close = node->right_idx;
-        far = node->left_idx;
-    }
-    if (depth > 1) {
+
+    // if (getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0) {
+    //     close = node->left_idx;
+    //     far = node->right_idx;
+    // }
+    // else {
+    //     close = node->right_idx;
+    //     far = node->left_idx;
+    // }
+    // unsigned short close, far;
+    // if (getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0) {
+    //     close = node->left_idx;
+    //     far = node->right_idx;
+    // }
+    // else {
+    //     close = node->right_idx;
+    //     far = node->left_idx;
+    // }
+    // if (close != 65535) {
+    //     knnSearch_aux(root, close, depth + 1, K, heap);
+    // }
+    // if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
+    //     if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+    // }
+
+    /** Really fcked up logic to try and make a given thread work on same nodes in build and search **/
+    if (depth <= 1) {
+        int other_thread_num = thread_num + 2 - depth;
+        // const auto job = [=] (MaxHeap& h, int tn, int idx) {
+        //     knnSearch_aux(root, idx, depth + 1, K, h, tn);
+        // };
+        const bool should_check_far = (int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first;
+        const bool go_left = getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0;
+
+        if (go_left) {
+            MaxHeap far_heap;
+            if (should_check_far) {
+                // std::cout << other_thread_num << ' ' << node->right_idx << ' ' << std::endl;
+                if (node->right_idx != 65535) thread_pool<T>().submit_task(other_thread_num, [&] () {
+                    knnSearch_aux(root, node->right_idx, depth + 1, K, far_heap, other_thread_num);
+                });
+            }
+            if (node->left_idx != 65535) knnSearch_aux(root, node->left_idx, depth + 1, K, heap, thread_num);
+            
+            thread_pool<T>().wait_thread(other_thread_num);
+            while (!far_heap.empty()) {
+                heap.push(far_heap.top());
+                far_heap.pop();
+            }
+            while ((int)heap.size() > K) {
+                heap.pop();
+            }
+        }
+        else {
+            // std::cout << other_thread_num << ' ' << node->right_idx << ' ' << std::endl;
+            if (node->right_idx != 65535) thread_pool<T>().submit_task(other_thread_num, [&] () {
+                knnSearch_aux(root, node->right_idx, depth + 1, K, heap, other_thread_num);
+            });
+
+            MaxHeap far_heap;
+            if (should_check_far) {
+                if (node->left_idx != 65535) knnSearch_aux(root, node->left_idx, depth + 1, K, far_heap, thread_num);
+            }
+            
+            thread_pool<T>().wait_thread(other_thread_num);
+            while (!far_heap.empty()) {
+                heap.push(far_heap.top());
+                far_heap.pop();
+            }
+            while ((int)heap.size() > K) {
+                heap.pop();
+            }
+        }
+    } else {
+        unsigned short close, far;
+        if (getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0) {
+            close = node->left_idx;
+            far = node->right_idx;
+        }
+        else {
+            close = node->right_idx;
+            far = node->left_idx;
+        }
         if (close != 65535) {
             knnSearch_aux(root, close, depth + 1, K, heap);
         }
@@ -387,24 +498,32 @@ void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap) {
             if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
         }
     }
-    else {
-        MaxHeap close_heap;
-        auto fleft = std::async(std::launch::async, [root, close, depth, K, &close_heap]() {
-            knnSearch_aux(root, close, depth + 1, K, close_heap);
-        });
+    // if (depth > 1) {
+    //     if (close != 65535) {
+    //         knnSearch_aux(root, close, depth + 1, K, heap);
+    //     }
+    //     if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
+    //         if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+    //     }
+    // }
+    // else {
+    //     MaxHeap close_heap;
+    //     auto fleft = std::async(std::launch::async, [root, close, depth, K, &close_heap]() {
+    //         knnSearch_aux(root, close, depth + 1, K, close_heap);
+    //     });
 
-        if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
-            if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
-        }
-        fleft.get();
-        while (!close_heap.empty()) {
-            heap.push(close_heap.top());
-            close_heap.pop();
-        }
-        while ((int)heap.size() > K) {
-            heap.pop();
-        }
-    }
+    //     if ((int) heap.size() < K || std::abs(getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim)) < heap.top().first) {
+    //         if (far != 65535) knnSearch_aux(root, far, depth + 1, K, heap);
+    //     }
+    //     fleft.get();
+    //     while (!close_heap.empty()) {
+    //         heap.push(close_heap.top());
+    //         close_heap.pop();
+    //     }
+    //     while ((int)heap.size() > K) {
+    //         heap.pop();
+    //     }
+    // }
 }
 
 /**
