@@ -10,12 +10,179 @@
 #include <future>
 #include <memory>
 // #include <omp.h>
+// 4, 5, 12920, 26743, 6, 0, 3, 68740, 40982, 63176,
+#define N 4
 
 #if defined(__SSE2__)
     #include <emmintrin.h> // Header for SSE2
 #endif
 
-// 4, 5, 12920, 26743, 6, 0, 3, 68740, 40982, 63176,
+// KD-tree node
+template <typename T>
+struct SubNode {
+    // Should be precisely 32 bytes, since int+short+short+T is 4+2+2+24  NVM
+    int idx = 0;
+    unsigned short left_idx = -1;
+    unsigned short right_idx = -1;
+    T* embedding;
+};
+
+template <typename T>
+struct Node
+{
+    //janky way to return a tree instead of a node
+    std::array<SubNode<T>, 40000> nodes;
+    int mid = 0;
+    // static query for comparisons
+    static T queryEmbedding;
+};
+
+/**
+ * @brief Alias for a pair consisting of a float and an int.
+ *
+ * Typically used to represent a priority queue item where the float
+ * denotes the priority (the distance of an embedding to the query embedding) and the int
+ * represents an associated index of the embedding.
+ */
+using PQItem = std::pair<float, int>;
+
+
+/**
+ * @brief Alias for a max-heap priority queue of PQItem elements.
+ *
+ * This type uses std::priority_queue with PQItem as the value type,
+ * std::vector<PQItem> as the underlying container, and std::less<PQItem>
+ * as the comparison function, resulting in a max-heap behavior.
+ */
+using MaxHeap = std::priority_queue<
+    PQItem,
+    std::vector<PQItem>,
+    std::less<PQItem>>;
+template <typename T> struct ThreadPool;
+template <typename T> inline ThreadPool<T>& thread_pool();
+
+template <typename T>
+struct ThreadTask {
+    //  janky way to have threads persist, so hopefully build and search
+    //  use the same cores for data subsection.
+    public:
+        std::condition_variable wakeup;
+
+        void push(std::function<void()> t) {
+            // std::cout << "New task pushed" << std::endl;
+            std::lock_guard<std::mutex> lock(mutex);
+            if (task) {
+                std::cout << "New task assigned while old still in effect" << std::endl;
+                return;
+            }
+            task = t;
+            wakeup.notify_all();
+        }
+
+        void doit() {
+            // std::cout << "Task tried" << std::endl;
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!task) {
+                // Spurious wakeups mean it can happen
+                std::cout << "Task tried when none exists" << std::endl;
+                return;
+            }
+
+            task();
+            task = nullptr;
+            thread_pool<T>().dec_active();
+        }
+
+        bool hasTask() {
+            if (task) return true;
+            return false;
+        }
+
+    private:
+        std::mutex mutex;
+        std::function<void()> task;
+};
+
+template <typename T>
+struct ThreadPool {
+    public:
+        ThreadPool() {
+            for (size_t i = 0; i < N; ++i) {
+                threads[i] = std::thread([this, i] {
+                    this->thread_func(i);
+                });
+            }
+        }
+
+        ~ThreadPool() {
+            stop = true;
+
+            for (int i=0; i<N; i++) {
+                tasks[i].wakeup.notify_all();
+            }
+
+            for (std::thread &thread : threads) {
+                thread.join();
+            }
+        }
+
+        void dec_active() {
+            std::lock_guard lock(mtx);
+            num_active--;
+            if (num_active == 0) all_finished.notify_all();
+        }
+
+        void submit_task( int thread_num, std::function<void()> task ) {
+            // Don't lock here
+            {
+                std::lock_guard lock(mtx);
+                num_active++;
+            }
+            tasks[thread_num].push(task);
+        }
+
+        void thread_func(int i);
+
+        void wait() {
+            // std::cout << "Waiting for all to finish" << std::endl;
+            if (num_active == 0) return;
+            while (true) {
+                std::unique_lock lock(mtx);
+                all_finished.wait(lock, [this] { return this->num_active == 0; });
+
+                if (num_active == 0) return;
+            }
+        }
+
+    
+    private:
+        std::condition_variable all_finished;
+        std::mutex mtx;
+        int num_active = 0;
+        std::array<ThreadTask<T>, N> tasks;
+        std::array<std::thread, N> threads;
+        bool stop = false;
+};
+
+template<typename T>
+void ThreadPool<T>::thread_func(int i) {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            tasks[i].wakeup.wait(lock, [this, i] { return stop || tasks[i].hasTask(); });
+
+            if (stop) return;
+        }
+
+        tasks[i].doit();
+    }
+}
+
+template <typename T>
+inline ThreadPool<T>& thread_pool() {
+    static ThreadPool<T> pool = ThreadPool<T>();
+    return pool;
+}
 
 template <typename T, typename = void>
 struct Embedding_T;
@@ -95,39 +262,20 @@ constexpr float getDiffAtCoor(T const &a, T const &b, size_t axis) {
     }
 }
 
-// KD-tree node
-template <typename T>
-struct SubNode {
-    // Should be precisely 32 bytes, since int+short+short+T is 4+2+2+24  NVM
-    int idx = 0;
-    unsigned short left_idx = -1;
-    unsigned short right_idx = -1;
-    T* embedding;
-};
-
-template <typename T>
-struct Node
-{
-    //janky way to return a tree instead of a node
-    std::array<SubNode<T>, 40000> nodes;
-    int mid = 0;
-    // static query for comparisons
-    static T queryEmbedding;
-};
-
 // Definition of static member
 template <typename T>
 T Node<T>::queryEmbedding;
 
 template <typename T>
-unsigned short buildKD_aux(
+void buildKD_aux(
     std::vector<std::pair<T,int>>& items,
     Node<T>* root,
     int start,
     int end,
-    int depth
+    int depth,
+    int thread_num = -1
 ) {
-    if (start == end) return -1;
+    if (start == end) return;
     int d = Embedding_T<T>::Dim();
     int split_dim = (depth) % d;
     
@@ -149,20 +297,25 @@ unsigned short buildKD_aux(
     curr->embedding = &(items[mid].first);
     curr->idx = items[mid].second;
 
-    if (depth > 1) {
-        curr->left_idx = buildKD_aux(items, root, start, mid, depth + 1);
-        curr->right_idx = buildKD_aux(items, root, mid + 1, end, depth + 1);
-    }
-    else {
-        auto fleft = std::async(std::launch::async, [&items, root, start, mid, depth]() {
-            return buildKD_aux(items, root, start, mid, depth + 1);
+    if (depth == 0) {
+        thread_pool<T>().submit_task(1, [&items, root, mid, end, depth]() {
+            return buildKD_aux(items, root, mid + 1, end, depth + 1, 1);
         });
-
-        curr->right_idx = buildKD_aux(items, root, mid + 1, end, depth + 1);
-        curr->left_idx= fleft.get();
+        buildKD_aux(items, root, start, mid, depth + 1);
+    } else if (depth == 1) {
+        // std::cout << thread_num << std::endl;
+        thread_pool<T>().submit_task(thread_num + 1, [&items, root, mid, end, depth, thread_num]() {
+            return buildKD_aux(items, root, mid + 1, end, depth + 1, thread_num + 1);
+        });
+        buildKD_aux(items, root, start, mid, depth + 1);
+    } else {
+        buildKD_aux(items, root, start, mid, depth + 1);
+        buildKD_aux(items, root, mid + 1, end, depth + 1);
     }
+    curr->left_idx = (start == mid) ? -1 : (start + mid) / 2;
+    curr->right_idx= (mid + 1 == end) ? -1 : (mid + 1 + end) / 2;
 
-    return mid;
+    return;
 }
 
 
@@ -184,6 +337,8 @@ Node<T>* buildKD(std::vector<std::pair<T,int>>& items, int depth = 0)
     root->mid = items.size() / 2;
 
     buildKD_aux(items, root, 0, (int) items.size(), depth);
+    thread_pool<T>().wait();
+    // std::cout << 1;
     return root;
 }
 
@@ -194,28 +349,6 @@ void freeTree(Node<T> *node) {
     delete node;
 }
 
-
-/**
- * @brief Alias for a pair consisting of a float and an int.
- *
- * Typically used to represent a priority queue item where the float
- * denotes the priority (the distance of an embedding to the query embedding) and the int
- * represents an associated index of the embedding.
- */
-using PQItem = std::pair<float, int>;
-
-
-/**
- * @brief Alias for a max-heap priority queue of PQItem elements.
- *
- * This type uses std::priority_queue with PQItem as the value type,
- * std::vector<PQItem> as the underlying container, and std::less<PQItem>
- * as the comparison function, resulting in a max-heap behavior.
- */
-using MaxHeap = std::priority_queue<
-    PQItem,
-    std::vector<PQItem>,
-    std::less<PQItem>>;
 
 // int asdf=0;
 template <typename T>
@@ -236,6 +369,7 @@ void knnSearch_aux(Node<T> *root, int idx, int depth, int K, MaxHeap &heap) {
             heap.push(PQItem(qdist, node->idx));
         }
     }
+    
     unsigned short close, far;
     if (getDiffAtCoor<T>(*(node->embedding), Node<T>::queryEmbedding, split_dim) > 0) {
         close = node->left_idx;
@@ -293,5 +427,7 @@ void knnSearch(Node<T> *root,
                int K,
                MaxHeap &heap)
 {
+
+    // std::cout << 2;
     knnSearch_aux(root, root->mid, depth, K, heap);
 }
